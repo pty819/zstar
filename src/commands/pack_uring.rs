@@ -125,7 +125,7 @@ async fn process_path_uring(
             Err(e) => {
                 if ignore_errors {
                     eprintln!("Warning: Skipping unreadable file {:?}: {}", path, e);
-                    return Ok(());
+                    return Ok::<(), anyhow::Error>(());
                 } else {
                     return Err(e.into());
                 }

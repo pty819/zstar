@@ -10,8 +10,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
-use crate::commands::pack_uring;
 use crate::utils::{FileId, get_file_id, get_mode};
 
 pub const LARGE_FILE_THRESHOLD: u64 = 1024 * 1024; // 1MB
@@ -104,10 +102,10 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
         #[cfg(target_os = "linux")]
         reader_handles.push(crate::commands::pack_uring::start_uring_worker(
             path_rx,
-            content_tx,
+            content_tx.clone(),
             pool_rx,
             input_dir.clone(),
-            pb,
+            pb.clone(),
             inode_cache,
             options.ignore_errors,
         ));
