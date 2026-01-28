@@ -14,9 +14,9 @@ use std::time::Duration;
 use crate::commands::pack_uring;
 use crate::utils::{FileId, get_file_id, get_mode};
 
-const LARGE_FILE_THRESHOLD: u64 = 1024 * 1024; // 1MB
+pub const LARGE_FILE_THRESHOLD: u64 = 1024 * 1024; // 1MB
 
-enum TarEntry {
+pub enum TarEntry {
     SmallFile(PathBuf, Vec<u8>, u32),
     LargeFile(PathBuf, u64, PathBuf, u32),
     Symlink(PathBuf, PathBuf, u32),

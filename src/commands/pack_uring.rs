@@ -3,7 +3,7 @@ use crate::commands::pack::{LARGE_FILE_THRESHOLD, TarEntry};
 #[cfg(target_os = "linux")]
 use crate::utils::{FileId, get_file_id, get_mode};
 #[cfg(target_os = "linux")]
-use anyhow::{Context, Result};
+use anyhow::Result;
 #[cfg(target_os = "linux")]
 use crossbeam_channel::{Receiver, Sender};
 #[cfg(target_os = "linux")]
@@ -11,7 +11,7 @@ use dashmap::DashMap;
 #[cfg(target_os = "linux")]
 use indicatif::ProgressBar;
 #[cfg(target_os = "linux")]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
@@ -26,13 +26,17 @@ pub fn start_uring_worker(
     pb: Arc<ProgressBar>,
     inode_cache: Arc<DashMap<FileId, PathBuf>>,
     ignore_errors: bool,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         tokio_uring::start(async move {
             let semaphore = Arc::new(Semaphore::new(128)); // Dispatch up to 128 IOs
 
             // We need to bridge Sync Channel -> Async Stream or Loop
             // Using spawn_blocking for the recv() is the standard way to not block the Runtime
+            // However, tokio-uring is single-threaded and doesn't have spawn_blocking in the same way regular tokio does?
+            // Wait, tokio-uring creates a runtime. usage of tokio::task::spawn_blocking is valid if it's available.
+            // tokio-uring implies using the uring runtime.
+
             loop {
                 // Acquire permit first to limit concurrency
                 let permit = match semaphore.clone().acquire_owned().await {
@@ -41,6 +45,12 @@ pub fn start_uring_worker(
                 };
 
                 let rx = path_rx.clone();
+                // We use standard tokio spawn_blocking if available or we just block?
+                // tokio-uring is a runtime.
+                // NOTE: Using standard tokio functions might require the standard tokio reactor references which might not be there?
+                // Correction: tokio-uring allows standard tokio types but uses its own driver.
+                // Use tokio::task::spawn_blocking safely.
+
                 let path_res = tokio::task::spawn_blocking(move || rx.recv()).await;
 
                 match path_res {
@@ -72,7 +82,7 @@ pub fn start_uring_worker(
                 }
             }
         });
-    });
+    })
 }
 
 #[cfg(target_os = "linux")]

@@ -1,4 +1,6 @@
 #[cfg(target_os = "linux")]
+use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
 use std::ffi::CStr;
 #[cfg(target_os = "linux")]
 use std::mem;
