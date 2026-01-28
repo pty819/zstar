@@ -1,0 +1,21 @@
+[package]
+name = "zstar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.54", features = ["derive"] }
+crossbeam-channel = "0.5.15"
+dashmap = "6.1.0"
+indicatif = "0.18.3"
+jwalk = "0.8.1"
+libc = "0.2.180"
+num_cpus = "1.17.0"
+tar = "0.4.44"
+zstd = { version = "0.13.3", features = ["zstdmt"] }
+zstd-safe = "7.2.4"
+
+[target.x86_64-unknown-linux-gnu.dependencies]
+tokio = { version = "1.49.0", features = ["full"] }
+tokio-uring = "0.5.0"
