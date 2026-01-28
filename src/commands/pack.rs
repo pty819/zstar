@@ -66,7 +66,7 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
     let input_dir = input.to_path_buf();
     let input_dir_clone = input_dir.clone();
     let scanner_handle = thread::spawn(move || {
-        for entry in WalkDir::new(&input_dir_clone) {
+        for entry in WalkDir::new(&input_dir_clone).skip_hidden(false) {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
