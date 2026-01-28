@@ -140,7 +140,7 @@ async fn process_path_uring(
             content_tx.send(Ok(TarEntry::Symlink(relative_path.clone(), target, mode)))?;
         } else {
             // Check Hardlinks (CPU/Memory op)
-            if let Some(fid) = get_file_id(&meta) {
+            if let Some(fid) = get_file_id(&path, &meta) {
                 if let Some(existing_entry) = inode_cache.get(&fid) {
                     let target = existing_entry.value().clone();
                     content_tx.send(Ok(TarEntry::HardLink(relative_path.clone(), target)))?;

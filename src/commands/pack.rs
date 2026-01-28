@@ -158,7 +158,7 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
                             )))?;
                         } else {
                             // Regular file - check Hardlinks
-                            if let Some(fid) = get_file_id(&meta) {
+                            if let Some(fid) = get_file_id(&path, &meta) {
                                 let is_hardlink = {
                                     if let Some(existing_entry) = inode_cache.get(&fid) {
                                         let target = existing_entry.value().clone();
