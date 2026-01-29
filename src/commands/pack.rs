@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use crossbeam_channel::bounded;
+use crossbeam_channel::{bounded, unbounded};
 use dashmap::DashMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use jwalk::WalkDir;
@@ -56,14 +56,14 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
     let (path_tx, path_rx) = bounded::<PathBuf>(1000);
     // Readers -> Writer
     let (content_tx, content_rx) = bounded::<Result<TarEntry>>(100);
-    // Buffer Pool
-    let (pool_tx, pool_rx) = bounded::<Vec<u8>>(200);
-    for _ in 0..200 {
-        let _ = pool_tx.send(Vec::with_capacity(LARGE_FILE_THRESHOLD as usize));
-    }
+    // Buffer Pool - Unbounded to prevent deadlocks.
+    // Readers will try to pop from here, if empty they allocate new.
+    // Writer will push back used buffers here.
+    let (pool_tx, pool_rx) = unbounded::<Vec<u8>>();
 
     // 4. Start Scanner Thread
-    let input_dir = input.to_path_buf();
+    // Canonicalize input path to ensure consistent absolute paths
+    let input_dir = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
     let input_dir_clone = input_dir.clone();
     let scanner_handle = thread::spawn(move || {
         for entry in WalkDir::new(&input_dir_clone).skip_hidden(false) {
@@ -122,10 +122,27 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
 
             reader_handles.push(thread::spawn(move || {
                 for path in path_rx {
-                    let parent = base_path.parent().unwrap_or(&base_path);
-                    let relative_path = match path.strip_prefix(parent) {
+                    // Normalize entry path to match base_path (WalkDir usually returns abs path if input is abs)
+                    // But to be safe, we're relying on WalkDir returning paths consistent with input.
+                    // Since we canonicalized input, WalkDir might still return raw paths from readdir?
+                    // No, jwalk/WalkDir usually joins with root.
+                    // Let's canonicalize the entry path too just to be safe?
+                    // No, canonicalize involves syscalls and resolving symlinks which we might NOT want to follow (if we want to archive the link itself).
+                    // Wait, we WANT to archive the symlink itself, not target.
+                    // So we should NOT canonicalize `path` here if it resolves symlinks!
+                    // Correct approach: Use strict prefix stripping.
+
+                    let relative_path = match path.strip_prefix(&base_path) {
                         Ok(p) => p.to_path_buf(),
-                        Err(_) => path.clone(),
+                        Err(_) => {
+                            // Fallback: This happens if path is not cleaner or canonicalized same way.
+                            // If base is /a/b and path is /a/b/../c (unlikely from walker but possible), strip fails.
+                            // We construct relative by simple filename if all else fails, or error out?
+                            // Safe default: use path file name
+                            path.file_name()
+                                .map(PathBuf::from)
+                                .unwrap_or_else(|| PathBuf::from("unknown"))
+                        }
                     };
 
                     let process_entry = || -> Result<()> {

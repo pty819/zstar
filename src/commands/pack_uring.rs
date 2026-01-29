@@ -5,7 +5,7 @@ use crate::utils::{FileId, FileMetadata, get_file_id, get_file_metadata};
 #[cfg(target_os = "linux")]
 use anyhow::Result;
 #[cfg(target_os = "linux")]
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 #[cfg(target_os = "linux")]
 use dashmap::DashMap;
 #[cfg(target_os = "linux")]
@@ -99,7 +99,10 @@ async fn process_path_uring(
         let parent = base_path.parent().unwrap_or(&base_path);
         let relative_path = match path.strip_prefix(parent) {
             Ok(p) => p.to_path_buf(),
-            Err(_) => path.clone(),
+            Err(_) => path
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("unknown")),
         };
 
         // We still use blocking fs::symlink_metadata because tokio-uring doesn't have metadata yet?

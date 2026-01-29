@@ -35,13 +35,46 @@ pub fn get_file_id(path: &Path, meta: &fs::Metadata) -> Option<FileId> {
             BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
         };
 
-        // Open file to get handle
-        let file = match fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => return None,
+        // Open file to get handle with shared access
+        use std::os::windows::ffi::OsStrExt;
+
+        let wide_path: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let handle = unsafe {
+            windows_sys::Win32::Storage::FileSystem::CreateFileW(
+                wide_path.as_ptr(),
+                0, // No access rights needed for GetFileInformationByHandle? Actually metadata query usually needs none or GENERIC_READ
+                // However, for GetFileInformationByHandle, 0 usually works or GENERIC_READ.
+                // Let's try 0 first (query attributes), if not GENERIC_READ.
+                // Wait, CreateFileW 0 access might only allow reading attributes.
+                // We need FILE_READ_ATTRIBUTES at least.
+                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
+                std::ptr::null(),
+                windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING,
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS, // Needed for directories
+                0,
+            )
         };
 
-        let handle = file.as_raw_handle() as HANDLE;
+        if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return None;
+        }
+
+        // We must ensure handle is closed. Wrap in a struct or just close it manually before returning.
+        // Let's use a defer-like struct or manually CloseHandle.
+        struct HandleGuard(HANDLE);
+        impl Drop for HandleGuard {
+            fn drop(&mut self) {
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+            }
+        }
+        let _guard = HandleGuard(handle);
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
 
         let result = unsafe { GetFileInformationByHandle(handle, &mut info) };

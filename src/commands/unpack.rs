@@ -171,7 +171,13 @@ pub fn execute(input: &Path, output: &Path, threads: u32) -> Result<()> {
     }
 
     // 3. Restore Directory Metadata (Deepest first to avoid modifying parent mtimes by accident)
-    dirs_metadata.sort_by(|a, b| b.path.as_os_str().len().cmp(&a.path.as_os_str().len()));
+    // Sort by number of components to ensure we do children before parents
+    dirs_metadata.sort_by(|a, b| {
+        b.path
+            .components()
+            .count()
+            .cmp(&a.path.components().count())
+    });
 
     for dir in dirs_metadata {
         set_permissions_and_times(&dir.path, dir.mode, dir.mtime).ok();
