@@ -35,7 +35,7 @@ jobs:
           # 指定要上传的文件路径
           # 注意：Linux 下默认生成在 target/release/ 下
           # 如果是 Windows 则是 target/release/xxx.exe
-          files: target/release/zstar 
+          files: ./target/release/zstar
           
           # 可选：是否生成 Release Notes (默认 true)
           generate_release_notes: true
