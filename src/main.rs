@@ -45,9 +45,14 @@ fn main() -> Result<()> {
                 },
             )?;
         }
-        Commands::Unpack { input, output } => {
+        Commands::Unpack {
+            input,
+            output,
+            threads,
+        } => {
             let output_path = output.unwrap_or_else(|| PathBuf::from("."));
-            commands::unpack::execute(&input, &output_path)?;
+            let threads_count = threads.unwrap_or_else(|| num_cpus::get() as u32);
+            commands::unpack::execute(&input, &output_path, threads_count)?;
             println!("Successfully unpacked {:?} to {:?}", input, output_path);
         }
     }

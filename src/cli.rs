@@ -42,5 +42,9 @@ pub enum Commands {
         /// Output directory (optional, defaults to current directory)
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Number of threads (default: num_cpus)
+        #[arg(short, long)]
+        threads: Option<u32>,
     },
 }
