@@ -83,3 +83,58 @@ pub fn get_mode(meta: &fs::Metadata) -> u32 {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct FileMetadata {
+    pub mode: u32,
+    pub mtime: u64,
+    pub uid: u64,
+    pub gid: u64,
+}
+
+pub fn get_file_metadata(path: &Path, meta: &fs::Metadata) -> FileMetadata {
+    let mode = get_mode(meta);
+
+    // mtime
+    let mtime = meta
+        .modified()
+        .unwrap_or_else(|_| std::time::SystemTime::now())
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    #[cfg(unix)]
+    {
+        let _ = path;
+        FileMetadata {
+            mode,
+            mtime,
+            uid: meta.uid() as u64,
+            gid: meta.gid() as u64,
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = path;
+        // On Windows, strict validation isn't as critical for tar compatibility usually,
+        // but we default to root (0) to avoid issues.
+        FileMetadata {
+            mode,
+            mtime,
+            uid: 0,
+            gid: 0,
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        FileMetadata {
+            mode,
+            mtime,
+            uid: 0,
+            gid: 0,
+        }
+    }
+}

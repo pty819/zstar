@@ -10,16 +10,16 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::utils::{FileId, get_file_id, get_mode};
+use crate::utils::{FileId, FileMetadata, get_file_id, get_file_metadata};
 
 pub const LARGE_FILE_THRESHOLD: u64 = 1024 * 1024; // 1MB
 
 pub enum TarEntry {
-    SmallFile(PathBuf, Vec<u8>, u32),
-    LargeFile(PathBuf, u64, PathBuf, u32),
-    Symlink(PathBuf, PathBuf, u32),
+    SmallFile(PathBuf, Vec<u8>, FileMetadata),
+    LargeFile(PathBuf, u64, PathBuf, FileMetadata),
+    Symlink(PathBuf, PathBuf, FileMetadata),
     HardLink(PathBuf, PathBuf),
-    Dir(PathBuf, u32),
+    Dir(PathBuf, FileMetadata),
 }
 
 pub struct PackOptions {
@@ -144,17 +144,17 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
                             }
                         };
 
-                        let mode = get_mode(&meta);
+                        let metadata = get_file_metadata(&path, &meta);
                         let file_type = meta.file_type();
 
                         if file_type.is_dir() {
-                            content_tx.send(Ok(TarEntry::Dir(relative_path.clone(), mode)))?;
+                            content_tx.send(Ok(TarEntry::Dir(relative_path.clone(), metadata)))?;
                         } else if file_type.is_symlink() {
                             let target = fs::read_link(&path)?;
                             content_tx.send(Ok(TarEntry::Symlink(
                                 relative_path.clone(),
                                 target,
-                                mode,
+                                metadata,
                             )))?;
                         } else {
                             // Regular file - check Hardlinks
@@ -186,7 +186,7 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
                                     relative_path.clone(),
                                     len,
                                     path.clone(),
-                                    mode,
+                                    metadata,
                                 )))?;
                             } else {
                                 let mut buf = pool_rx
@@ -200,7 +200,7 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
                                 content_tx.send(Ok(TarEntry::SmallFile(
                                     relative_path.clone(),
                                     buf,
-                                    mode,
+                                    metadata,
                                 )))?;
                             }
                         }
@@ -231,35 +231,47 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
     for entry in content_rx {
         let entry = entry?;
         match entry {
-            TarEntry::Dir(path, mode) => {
+            TarEntry::Dir(path, metadata) => {
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(tar::EntryType::Directory);
-                header.set_mode(mode);
+                header.set_mode(metadata.mode);
+                header.set_uid(metadata.uid);
+                header.set_gid(metadata.gid);
+                header.set_mtime(metadata.mtime);
                 header.set_size(0);
                 header.set_cksum();
                 tar.append_dir(&path, ".")?;
             }
-            TarEntry::SmallFile(path, buf, mode) => {
+            TarEntry::SmallFile(path, buf, metadata) => {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(buf.len() as u64);
-                header.set_mode(mode);
+                header.set_mode(metadata.mode);
+                header.set_uid(metadata.uid);
+                header.set_gid(metadata.gid);
+                header.set_mtime(metadata.mtime);
                 header.set_cksum();
                 tar.append_data(&mut header, &path, &buf[..])?;
                 let _ = pool_tx.send(buf);
             }
-            TarEntry::LargeFile(path, len, abs_path, mode) => {
+            TarEntry::LargeFile(path, len, abs_path, metadata) => {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(len);
-                header.set_mode(mode);
+                header.set_mode(metadata.mode);
+                header.set_uid(metadata.uid);
+                header.set_gid(metadata.gid);
+                header.set_mtime(metadata.mtime);
                 header.set_cksum();
                 let mut f = File::open(abs_path)?;
                 tar.append_data(&mut header, &path, &mut f)?;
             }
-            TarEntry::Symlink(path, target, mode) => {
+            TarEntry::Symlink(path, target, metadata) => {
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(tar::EntryType::Symlink);
                 header.set_size(0);
-                header.set_mode(mode);
+                header.set_mode(metadata.mode);
+                header.set_uid(metadata.uid);
+                header.set_gid(metadata.gid);
+                header.set_mtime(metadata.mtime);
                 header.set_link_name(&target).unwrap_or(());
                 header.set_cksum();
                 tar.append_data(&mut header, &path, &mut std::io::empty())?;

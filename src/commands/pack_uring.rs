@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 use crate::commands::pack::{LARGE_FILE_THRESHOLD, TarEntry};
 #[cfg(target_os = "linux")]
-use crate::utils::{FileId, get_file_id, get_mode};
+use crate::utils::{FileId, FileMetadata, get_file_id, get_file_metadata};
 #[cfg(target_os = "linux")]
 use anyhow::Result;
 #[cfg(target_os = "linux")]
@@ -109,11 +109,11 @@ async fn process_path_uring(
         // It's technically NOT uring, but the heavy lifting (Reading Content) IS uring.
 
         // Blocking Metadata
-        let (meta, mode, file_type) = match tokio::task::spawn_blocking({
+        let (meta, metadata, file_type) = match tokio::task::spawn_blocking({
             let p = path.clone();
-            move || -> Result<(std::fs::Metadata, u32, std::fs::FileType)> {
+            move || -> Result<(std::fs::Metadata, FileMetadata, std::fs::FileType)> {
                 let m = std::fs::symlink_metadata(&p)?;
-                let mo = get_mode(&m);
+                let mo = get_file_metadata(&p, &m);
                 let ft = m.file_type();
                 Ok((m, mo, ft))
             }
@@ -133,11 +133,15 @@ async fn process_path_uring(
         };
 
         if file_type.is_dir() {
-            content_tx.send(Ok(TarEntry::Dir(relative_path.clone(), mode)))?;
+            content_tx.send(Ok(TarEntry::Dir(relative_path.clone(), metadata)))?;
         } else if file_type.is_symlink() {
             // Read link is also metadata-ish
             let target = tokio::fs::read_link(&path).await?;
-            content_tx.send(Ok(TarEntry::Symlink(relative_path.clone(), target, mode)))?;
+            content_tx.send(Ok(TarEntry::Symlink(
+                relative_path.clone(),
+                target,
+                metadata,
+            )))?;
         } else {
             // Check Hardlinks (CPU/Memory op)
             if let Some(fid) = get_file_id(&path, &meta) {
@@ -158,7 +162,7 @@ async fn process_path_uring(
                     relative_path.clone(),
                     len,
                     path.clone(),
-                    mode,
+                    metadata,
                 )))?;
             } else {
                 // Small File: Read using IO URING
@@ -196,7 +200,7 @@ async fn process_path_uring(
                 content_tx.send(Ok(TarEntry::SmallFile(
                     relative_path.clone(),
                     valid_buf,
-                    mode,
+                    metadata,
                 )))?;
             }
         }
