@@ -28,35 +28,39 @@ pub fn start_uring_worker(
     ignore_errors: bool,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // Create an Async-to-Sync Bridge
+        // uring tasks will send to async_tx (non-blocking yield on full)
+        // bridge thread will forward to content_tx (blocking)
+        let (async_tx, mut async_rx) = tokio::sync::mpsc::channel::<Result<TarEntry>>(100);
+
+        // Spawn Bridge Thread
+        let bridge_handle = std::thread::spawn(move || {
+            while let Some(entry) = async_rx.blocking_recv() {
+                if content_tx.send(entry).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Start uring Runtime on this thread
         tokio_uring::start(async move {
             let semaphore = Arc::new(Semaphore::new(128)); // Dispatch up to 128 IOs
 
-            // We need to bridge Sync Channel -> Async Stream or Loop
-            // Using spawn_blocking for the recv() is the standard way to not block the Runtime
-            // However, tokio-uring is single-threaded and doesn't have spawn_blocking in the same way regular tokio does?
-            // Wait, tokio-uring creates a runtime. usage of tokio::task::spawn_blocking is valid if it's available.
-            // tokio-uring implies using the uring runtime.
-
             loop {
-                // Acquire permit first to limit concurrency
+                // Acquire permit
                 let permit = match semaphore.clone().acquire_owned().await {
                     Ok(p) => p,
                     Err(_) => break, // Closed
                 };
 
+                // Receive path from Crossbeam (blocking involved? No, we spawn blocking)
                 let rx = path_rx.clone();
-                // We use standard tokio spawn_blocking if available or we just block?
-                // tokio-uring is a runtime.
-                // NOTE: Using standard tokio functions might require the standard tokio reactor references which might not be there?
-                // Correction: tokio-uring allows standard tokio types but uses its own driver.
-                // Use tokio::task::spawn_blocking safely.
-
                 let path_res = tokio::task::spawn_blocking(move || rx.recv()).await;
 
                 match path_res {
                     Ok(Ok(path)) => {
                         // Got path, spawn local task for IO
-                        let content_tx = content_tx.clone();
+                        let async_tx = async_tx.clone();
                         let pool_rx = pool_rx.clone();
                         let base_path = input_dir.clone();
                         let p_bar = pb.clone();
@@ -68,7 +72,7 @@ pub fn start_uring_worker(
                             process_path_uring(
                                 path,
                                 base_path,
-                                content_tx,
+                                async_tx,
                                 pool_rx,
                                 p_bar,
                                 i_cache,
@@ -81,7 +85,18 @@ pub fn start_uring_worker(
                     Err(_) => break,     // Join Error
                 }
             }
+
+            // Wait for all in-flight tasks to complete
+            // We do this by re-acquiring all semaphore permits.
+            // This ensures all spawned tasks have dropped their permits.
+            // We use a loop 128 times.
+            for _ in 0..128 {
+                let _ = semaphore.acquire().await;
+            }
         });
+
+        // Wait for bridge to finish (it finishes when async_tx is dropped by uring runtime)
+        let _ = bridge_handle.join();
     })
 }
 
@@ -89,7 +104,7 @@ pub fn start_uring_worker(
 async fn process_path_uring(
     path: PathBuf,
     base_path: PathBuf,
-    content_tx: Sender<Result<TarEntry>>,
+    content_tx: tokio::sync::mpsc::Sender<Result<TarEntry>>,
     pool_rx: Receiver<Vec<u8>>,
     pb: Arc<ProgressBar>,
     inode_cache: Arc<DashMap<FileId, PathBuf>>,
@@ -136,21 +151,30 @@ async fn process_path_uring(
         };
 
         if file_type.is_dir() {
-            content_tx.send(Ok(TarEntry::Dir(relative_path.clone(), metadata)))?;
+            content_tx
+                .send(Ok(TarEntry::Dir(relative_path.clone(), metadata)))
+                .await
+                .map_err(|_| anyhow::anyhow!("Channel closed"))?;
         } else if file_type.is_symlink() {
             // Read link is also metadata-ish
             let target = tokio::fs::read_link(&path).await?;
-            content_tx.send(Ok(TarEntry::Symlink(
-                relative_path.clone(),
-                target,
-                metadata,
-            )))?;
+            content_tx
+                .send(Ok(TarEntry::Symlink(
+                    relative_path.clone(),
+                    target,
+                    metadata,
+                )))
+                .await
+                .map_err(|_| anyhow::anyhow!("Channel closed"))?;
         } else {
             // Check Hardlinks (CPU/Memory op)
             if let Some(fid) = get_file_id(&path, &meta) {
                 if let Some(existing_entry) = inode_cache.get(&fid) {
                     let target = existing_entry.value().clone();
-                    content_tx.send(Ok(TarEntry::HardLink(relative_path.clone(), target)))?;
+                    content_tx
+                        .send(Ok(TarEntry::HardLink(relative_path.clone(), target)))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("Channel closed"))?;
                     pb.inc(1);
                     pb.set_message(format!("{:?}", relative_path));
                     return Ok(());
@@ -161,12 +185,15 @@ async fn process_path_uring(
 
             let len = meta.len();
             if len > LARGE_FILE_THRESHOLD {
-                content_tx.send(Ok(TarEntry::LargeFile(
-                    relative_path.clone(),
-                    len,
-                    path.clone(),
-                    metadata,
-                )))?;
+                content_tx
+                    .send(Ok(TarEntry::LargeFile(
+                        relative_path.clone(),
+                        len,
+                        path.clone(),
+                        metadata,
+                    )))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Channel closed"))?;
             } else {
                 // Small File: Read using IO URING
                 let mut buf = pool_rx
@@ -175,16 +202,11 @@ async fn process_path_uring(
                 if buf.capacity() < len as usize {
                     buf.reserve(len as usize - buf.capacity());
                 }
-                // Resize to len effectively for reading? No, we need a buffer.
-                // tokio-uring uses owned buffers.
-                // We need to pass the buffer to the operation.
 
                 // Open file using tokio_uring
                 let file = tokio_uring::fs::File::open(&path).await?;
 
                 // Read
-                // tokio_uring::fs::File::read_at takes (buf, pos).
-                // It returns (res, buf).
                 if buf.len() < len as usize {
                     buf.resize(len as usize, 0);
                 }
@@ -193,18 +215,18 @@ async fn process_path_uring(
                 let mut valid_buf = buf_ret;
                 res?; // check error
 
-                // The buffer might be larger than len if reused.
-                // Should truncate to actual read size?
-                // read_at returns bytes read.
                 if valid_buf.len() > len as usize {
                     valid_buf.truncate(len as usize);
                 }
 
-                content_tx.send(Ok(TarEntry::SmallFile(
-                    relative_path.clone(),
-                    valid_buf,
-                    metadata,
-                )))?;
+                content_tx
+                    .send(Ok(TarEntry::SmallFile(
+                        relative_path.clone(),
+                        valid_buf,
+                        metadata,
+                    )))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Channel closed"))?;
             }
         }
         pb.inc(1);
@@ -216,7 +238,9 @@ async fn process_path_uring(
         if ignore_errors {
             eprintln!("Warning: Failed to process {:?}: {}", path, e);
         } else {
-            let _ = content_tx.send(Err(anyhow::anyhow!("Failed to process {:?}: {}", path, e)));
+            let _ = content_tx
+                .send(Err(anyhow::anyhow!("Failed to process {:?}: {}", path, e)))
+                .await;
         }
     }
 }
