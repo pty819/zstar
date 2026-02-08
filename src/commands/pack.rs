@@ -12,11 +12,14 @@ use std::time::Duration;
 
 use crate::utils::{FileId, FileMetadata, get_file_id, get_file_metadata};
 
-pub const LARGE_FILE_THRESHOLD: u64 = 1024 * 1024; // 1MB
+pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024; // 4MB
+pub const MEMORY_FILE_THRESHOLD: u64 = 128 * 1024 * 1024; // 128MB
 
 pub enum TarEntry {
     SmallFile(PathBuf, Vec<u8>, FileMetadata),
-    LargeFile(PathBuf, u64, PathBuf, FileMetadata),
+    LargeFileStart(PathBuf, u64 /* total_size */, FileMetadata),
+    LargeFileChunk(Vec<u8>),
+    LargeFileEnd,
     Symlink(PathBuf, PathBuf, FileMetadata),
     HardLink(PathBuf, PathBuf),
     Dir(PathBuf, FileMetadata),
@@ -54,15 +57,24 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
     // 3. Setup Channels
     // Scanner -> Readers
     let (path_tx, path_rx) = bounded::<PathBuf>(1000);
-    // Readers -> Writer
+    // Readers -> Writer (Metadata & Small Files)
     let (content_tx, content_rx) = bounded::<Result<TarEntry>>(100);
+    // Large File Data Channel (Dedicated to prevent interleaving)
+    let (chunk_tx, chunk_rx) = bounded::<Result<TarEntry>>(100);
+
     // Buffer Pool - Unbounded to prevent deadlocks.
-    // Readers will try to pop from here, if empty they allocate new.
-    // Writer will push back used buffers here.
     let (pool_tx, pool_rx) = unbounded::<Vec<u8>>();
 
+    // Global Mutex for Large File Serialization (Threaded Mode Only)
+    let large_file_mutex = Arc::new(std::sync::Mutex::new(()));
+    // For async uring, we need an async mutex. We will pass a separate one or let uring create its own?
+    // PackUring needs to share global serialization if we mixed threaded and uring?
+    // PackUring is exclusive with Threaded. So we can use separate mutexes.
+    // We will let pack_uring create its own tokio Mutex inside start_uring_worker?
+    // No, pack_uring::start_uring_worker is called once. The mutex must be shared among uring tasks.
+    // So uring worker will create its own Arc<tokio::Mutex>.
+
     // 4. Start Scanner Thread
-    // Canonicalize input path to ensure consistent absolute paths
     let input_dir = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
     let input_dir_clone = input_dir.clone();
     let scanner_handle = thread::spawn(move || {
@@ -103,6 +115,7 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
         reader_handles.push(crate::commands::pack_uring::start_uring_worker(
             path_rx,
             content_tx.clone(),
+            chunk_tx.clone(),
             pool_rx,
             input_dir.clone(),
             pb.clone(),
@@ -114,35 +127,23 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
         for _ in 0..num_readers {
             let path_rx = path_rx.clone();
             let content_tx = content_tx.clone();
+            let chunk_tx = chunk_tx.clone();
             let base_path = input_dir.clone();
             let pool_rx = pool_rx.clone();
             let pb = pb.clone();
             let inode_cache = inode_cache.clone();
             let ignore_errors = options.ignore_errors;
+            let large_file_mutex = large_file_mutex.clone();
 
             reader_handles.push(thread::spawn(move || {
                 for path in path_rx {
-                    // Normalize entry path to match base_path (WalkDir usually returns abs path if input is abs)
-                    // But to be safe, we're relying on WalkDir returning paths consistent with input.
-                    // Since we canonicalized input, WalkDir might still return raw paths from readdir?
-                    // No, jwalk/WalkDir usually joins with root.
-                    // Let's canonicalize the entry path too just to be safe?
-                    // No, canonicalize involves syscalls and resolving symlinks which we might NOT want to follow (if we want to archive the link itself).
-                    // Wait, we WANT to archive the symlink itself, not target.
-                    // So we should NOT canonicalize `path` here if it resolves symlinks!
-                    // Correct approach: Use strict prefix stripping.
-
+                    // Safe Relative Path Logic
                     let relative_path = match path.strip_prefix(&base_path) {
                         Ok(p) => p.to_path_buf(),
-                        Err(_) => {
-                            // Fallback: This happens if path is not cleaner or canonicalized same way.
-                            // If base is /a/b and path is /a/b/../c (unlikely from walker but possible), strip fails.
-                            // We construct relative by simple filename if all else fails, or error out?
-                            // Safe default: use path file name
-                            path.file_name()
-                                .map(PathBuf::from)
-                                .unwrap_or_else(|| PathBuf::from("unknown"))
-                        }
+                        Err(_) => path
+                            .file_name()
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| PathBuf::from("unknown")),
                     };
 
                     let process_entry = || -> Result<()> {
@@ -174,7 +175,6 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
                                 metadata,
                             )))?;
                         } else {
-                            // Regular file - check Hardlinks
                             if let Some(fid) = get_file_id(&path, &meta) {
                                 let is_hardlink = {
                                     if let Some(existing_entry) = inode_cache.get(&fid) {
@@ -198,21 +198,49 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
 
                             let len = meta.len();
 
-                            if len > LARGE_FILE_THRESHOLD {
-                                content_tx.send(Ok(TarEntry::LargeFile(
+                            if len >= MEMORY_FILE_THRESHOLD {
+                                // Large File: Sequential Chunking with Lock
+                                let _lock = large_file_mutex.lock().unwrap();
+
+                                content_tx.send(Ok(TarEntry::LargeFileStart(
                                     relative_path.clone(),
                                     len,
-                                    path.clone(),
                                     metadata,
                                 )))?;
+
+                                let mut f = File::open(&path)?;
+                                let mut remain = len;
+                                while remain > 0 {
+                                    let chunk_size = std::cmp::min(remain, CHUNK_SIZE);
+                                    let mut buf = pool_rx.try_recv().unwrap_or_else(|_| {
+                                        Vec::with_capacity(chunk_size as usize)
+                                    });
+                                    if buf.capacity() < chunk_size as usize {
+                                        buf.reserve(chunk_size as usize - buf.capacity());
+                                    }
+                                    unsafe {
+                                        buf.set_len(chunk_size as usize);
+                                    } // Unsafe set len? Or just clear and read?
+                                    // Safety: read_exact/read usually fine. But take().read_to_end is safe.
+                                    buf.clear();
+                                    let mut chunk_reader = (&mut f).take(chunk_size);
+                                    chunk_reader.read_to_end(&mut buf)?;
+
+                                    chunk_tx.send(Ok(TarEntry::LargeFileChunk(buf)))?;
+                                    remain -= chunk_size;
+                                }
+
+                                chunk_tx.send(Ok(TarEntry::LargeFileEnd))?;
+                                // Lock released here
                             } else {
+                                // Small File: Read All
                                 let mut buf = pool_rx
                                     .try_recv()
                                     .unwrap_or_else(|_| Vec::with_capacity(len as usize));
                                 buf.clear();
 
-                                let f = File::open(&path)?;
-                                f.take(len).read_to_end(&mut buf)?;
+                                let mut f = File::open(&path)?;
+                                f.read_to_end(&mut buf)?; // Read whole file
 
                                 content_tx.send(Ok(TarEntry::SmallFile(
                                     relative_path.clone(),
@@ -243,10 +271,16 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
     }
 
     drop(content_tx);
+    drop(chunk_tx); // Important: drop writer's sender handle so rx can close
 
     // 6. Writer Current Thread
-    for entry in content_rx {
-        let entry = entry?;
+    loop {
+        let entry_result = content_rx.recv();
+        if entry_result.is_err() {
+            break; // Channel closed and empty
+        }
+        let entry = entry_result.unwrap()?;
+
         match entry {
             TarEntry::Dir(path, metadata) => {
                 let mut header = tar::Header::new_gnu();
@@ -270,7 +304,7 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
                 tar.append_data(&mut header, &path, &buf[..])?;
                 let _ = pool_tx.send(buf);
             }
-            TarEntry::LargeFile(path, len, abs_path, metadata) => {
+            TarEntry::LargeFileStart(path, len, metadata) => {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(len);
                 header.set_mode(metadata.mode);
@@ -278,8 +312,96 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
                 header.set_gid(metadata.gid);
                 header.set_mtime(metadata.mtime);
                 header.set_cksum();
-                let mut f = File::open(abs_path)?;
-                tar.append_data(&mut header, &path, &mut f)?;
+
+                // Construct Reader that pulls subsequent chunks from CHUNK_RX (Dedicated channel)
+                struct ChannelReader<'a> {
+                    rx: &'a crossbeam_channel::Receiver<Result<TarEntry>>,
+                    buffer: Vec<u8>,
+                    cursor: usize,
+                    exhausted: bool,
+                    total_read: u64,
+                    expected: u64,
+                    pool_tx: &'a crossbeam_channel::Sender<Vec<u8>>,
+                }
+
+                impl<'a> Read for ChannelReader<'a> {
+                    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                        if self.exhausted {
+                            return Ok(0);
+                        }
+
+                        // Serve from buffer
+                        if self.cursor < self.buffer.len() {
+                            let available = self.buffer.len() - self.cursor;
+                            let to_read = std::cmp::min(available, out.len());
+                            out[..to_read]
+                                .copy_from_slice(&self.buffer[self.cursor..self.cursor + to_read]);
+                            self.cursor += to_read;
+                            self.total_read += to_read as u64;
+
+                            if self.cursor == self.buffer.len() {
+                                // Recycle buffer
+                                let b = std::mem::replace(&mut self.buffer, Vec::new());
+                                if b.capacity() > 0 {
+                                    let _ = self.pool_tx.send(b);
+                                }
+                            }
+                            return Ok(to_read);
+                        }
+
+                        // Need new chunk
+                        match self.rx.recv() {
+                            Ok(Ok(entry)) => match entry {
+                                TarEntry::LargeFileChunk(buf) => {
+                                    self.buffer = buf;
+                                    self.cursor = 0;
+                                    self.read(out) // Recurse to copy
+                                }
+                                TarEntry::LargeFileEnd => {
+                                    self.exhausted = true;
+                                    if self.total_read != self.expected {
+                                        return Err(std::io::Error::new(
+                                            std::io::ErrorKind::UnexpectedEof,
+                                            format!(
+                                                "Size mismatch: expected {}, got {}",
+                                                self.expected, self.total_read
+                                            ),
+                                        ));
+                                    }
+                                    Ok(0)
+                                }
+                                _ => Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "Unexpected entry type, expected chunk from dedicated channel",
+                                )),
+                            },
+                            Ok(Err(e)) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                            Err(_) => Err(std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "Chunk Channel closed unexpectedly",
+                            )),
+                        }
+                    }
+                }
+
+                let mut reader = ChannelReader {
+                    rx: &chunk_rx, // Read from dedicated chunk channel
+                    buffer: Vec::new(),
+                    cursor: 0,
+                    exhausted: false,
+                    total_read: 0,
+                    expected: len,
+                    pool_tx: &pool_tx,
+                };
+
+                // If append_data returns error (e.g. read error), we should handle it.
+                // But we are in a loop handling entries.
+                tar.append_data(&mut header, &path, &mut reader)?;
+            }
+            TarEntry::LargeFileChunk(_) | TarEntry::LargeFileEnd => {
+                // We should NEVER receive Chunk/End on content_rx!
+                // This confirms separation works.
+                anyhow::bail!("Protocol Error: chunk received on metadata channel");
             }
             TarEntry::Symlink(path, target, metadata) => {
                 let mut header = tar::Header::new_gnu();

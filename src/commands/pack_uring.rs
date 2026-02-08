@@ -1,11 +1,11 @@
 #[cfg(target_os = "linux")]
-use crate::commands::pack::{LARGE_FILE_THRESHOLD, TarEntry};
+use crate::commands::pack::{CHUNK_SIZE, MEMORY_FILE_THRESHOLD, TarEntry};
 #[cfg(target_os = "linux")]
 use crate::utils::{FileId, FileMetadata, get_file_id, get_file_metadata};
 #[cfg(target_os = "linux")]
 use anyhow::Result;
 #[cfg(target_os = "linux")]
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender};
 #[cfg(target_os = "linux")]
 use dashmap::DashMap;
 #[cfg(target_os = "linux")]
@@ -15,12 +15,13 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 
 #[cfg(target_os = "linux")]
 pub fn start_uring_worker(
     path_rx: Receiver<PathBuf>,
     content_tx: Sender<Result<TarEntry>>,
+    chunk_tx: Sender<Result<TarEntry>>, // Added argument
     pool_rx: Receiver<Vec<u8>>,
     input_dir: PathBuf,
     pb: Arc<ProgressBar>,
@@ -35,12 +36,32 @@ pub fn start_uring_worker(
 
         // Spawn Bridge Thread
         let bridge_handle = std::thread::spawn(move || {
-            while let Some(entry) = async_rx.blocking_recv() {
-                if content_tx.send(entry).is_err() {
-                    break;
+            while let Some(res) = async_rx.blocking_recv() {
+                match res {
+                    Ok(entry) => match entry {
+                        TarEntry::LargeFileChunk(_) | TarEntry::LargeFileEnd => {
+                            if chunk_tx.send(Ok(entry)).is_err() {
+                                break;
+                            }
+                        }
+                        _ => {
+                            if content_tx.send(Ok(entry)).is_err() {
+                                break;
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        // Forward errors to content channel
+                        if content_tx.send(Err(e)).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         });
+
+        // Large File Serializer Mutex (Async)
+        let large_file_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
         // Start uring Runtime on this thread
         tokio_uring::start(async move {
@@ -65,6 +86,7 @@ pub fn start_uring_worker(
                         let base_path = input_dir.clone();
                         let p_bar = pb.clone();
                         let i_cache = inode_cache.clone();
+                        let lf_mutex = large_file_mutex.clone();
 
                         tokio::task::spawn_local(async move {
                             let _permit = permit; // Hold until done
@@ -76,6 +98,7 @@ pub fn start_uring_worker(
                                 pool_rx,
                                 p_bar,
                                 i_cache,
+                                lf_mutex,
                                 ignore_errors,
                             )
                             .await;
@@ -108,6 +131,7 @@ async fn process_path_uring(
     pool_rx: Receiver<Vec<u8>>,
     pb: Arc<ProgressBar>,
     inode_cache: Arc<DashMap<FileId, PathBuf>>,
+    large_file_mutex: Arc<tokio::sync::Mutex<()>>,
     ignore_errors: bool,
 ) {
     let process = async {
@@ -184,16 +208,55 @@ async fn process_path_uring(
             }
 
             let len = meta.len();
-            if len > LARGE_FILE_THRESHOLD {
+            if len >= MEMORY_FILE_THRESHOLD {
+                // Large File Chunking
+                let _lock = large_file_mutex.lock().await;
+
                 content_tx
-                    .send(Ok(TarEntry::LargeFile(
+                    .send(Ok(TarEntry::LargeFileStart(
                         relative_path.clone(),
                         len,
-                        path.clone(),
                         metadata,
                     )))
                     .await
                     .map_err(|_| anyhow::anyhow!("Channel closed"))?;
+
+                let file = tokio_uring::fs::File::open(&path).await?;
+                let mut pos = 0;
+                while pos < len {
+                    let chunk_size = std::cmp::min(len - pos, CHUNK_SIZE);
+                    let mut buf = pool_rx
+                        .try_recv()
+                        .unwrap_or_else(|_| Vec::with_capacity(chunk_size as usize));
+                    if buf.capacity() < chunk_size as usize {
+                        buf.reserve(chunk_size as usize - buf.capacity());
+                    }
+                    // tokio-uring needs full buffer to read into? No, it takes buffer by value.
+                    // But we must correct size.
+                    if buf.len() < chunk_size as usize {
+                        buf.resize(chunk_size as usize, 0);
+                    }
+
+                    let (res, buf_ret) = file.read_at(buf, pos).await;
+                    let mut valid_buf = buf_ret;
+                    res?;
+
+                    if valid_buf.len() > chunk_size as usize {
+                        valid_buf.truncate(chunk_size as usize);
+                    }
+
+                    content_tx
+                        .send(Ok(TarEntry::LargeFileChunk(valid_buf)))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("Channel closed"))?;
+                    pos += chunk_size;
+                }
+
+                content_tx
+                    .send(Ok(TarEntry::LargeFileEnd))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Channel closed"))?;
+                // Unlock
             } else {
                 // Small File: Read using IO URING
                 let mut buf = pool_rx
@@ -202,18 +265,14 @@ async fn process_path_uring(
                 if buf.capacity() < len as usize {
                     buf.reserve(len as usize - buf.capacity());
                 }
-
-                // Open file using tokio_uring
-                let file = tokio_uring::fs::File::open(&path).await?;
-
-                // Read
                 if buf.len() < len as usize {
                     buf.resize(len as usize, 0);
                 }
 
+                let file = tokio_uring::fs::File::open(&path).await?;
                 let (res, buf_ret) = file.read_at(buf, 0).await;
                 let mut valid_buf = buf_ret;
-                res?; // check error
+                res?;
 
                 if valid_buf.len() > len as usize {
                     valid_buf.truncate(len as usize);
