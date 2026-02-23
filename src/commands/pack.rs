@@ -341,7 +341,7 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
 
                             if self.cursor == self.buffer.len() {
                                 // Recycle buffer
-                                let b = std::mem::replace(&mut self.buffer, Vec::new());
+                                let b = std::mem::take(&mut self.buffer);
                                 if b.capacity() > 0 {
                                     let _ = self.pool_tx.send(b);
                                 }
@@ -375,7 +375,7 @@ pub fn execute(input: &Path, output: &Path, options: PackOptions) -> Result<()> 
                                     "Unexpected entry type, expected chunk from dedicated channel",
                                 )),
                             },
-                            Ok(Err(e)) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                            Ok(Err(e)) => Err(std::io::Error::other(e)),
                             Err(_) => Err(std::io::Error::new(
                                 std::io::ErrorKind::BrokenPipe,
                                 "Chunk Channel closed unexpectedly",

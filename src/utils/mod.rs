@@ -29,7 +29,7 @@ pub fn get_file_id(path: &Path, meta: &fs::Metadata) -> Option<FileId> {
     #[cfg(windows)]
     {
         let _ = meta; // Unused on Windows
-        use std::os::windows::io::AsRawHandle;
+        // use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::HANDLE;
         use windows_sys::Win32::Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
@@ -107,12 +107,10 @@ pub fn get_mode(meta: &fs::Metadata) -> u32 {
     {
         if meta.is_dir() {
             0o755
+        } else if meta.permissions().readonly() {
+            0o444
         } else {
-            if meta.permissions().readonly() {
-                0o444
-            } else {
-                0o644
-            }
+            0o644
         }
     }
 }

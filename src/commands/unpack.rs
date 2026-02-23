@@ -197,12 +197,11 @@ fn worker_loop(rx: Arc<Receiver<UnpackTask>>) -> Result<()> {
                 mode,
                 mtime,
             } => {
-                if let Some(parent) = path.parent() {
-                    if !created_dirs.contains(parent) {
+                if let Some(parent) = path.parent()
+                    && !created_dirs.contains(parent) {
                         fs::create_dir_all(parent)?;
                         created_dirs.insert(parent.to_path_buf());
                     }
-                }
 
                 {
                     let mut file = File::create(&path)?;
