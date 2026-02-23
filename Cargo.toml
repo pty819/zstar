@@ -4,21 +4,21 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.100"
-clap = { version = "4.5.54", features = ["derive"] }
+anyhow = "1.0.101"
+clap = { version = "4.5.60", features = ["derive"] }
 crossbeam-channel = "0.5.15"
 dashmap = "6.1.0"
-indicatif = "0.18.3"
+indicatif = "0.18.4"
 jwalk = "0.8.1"
 libc = "0.2.180"
 num_cpus = "1.17.0"
 tar = "0.4.44"
 zstd = { version = "0.13.3", features = ["zstdmt"] }
-zstd-safe = "7.2.4"
+compio = { version = "0.18", features = ["fs", "macros", "sync", "runtime"] }
+compio-runtime = "0.11"
+flume = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
 
-[target.x86_64-unknown-linux-gnu.dependencies]
-tokio = { version = "1.49.0", features = ["full"] }
-tokio-uring = "0.5.0"
+

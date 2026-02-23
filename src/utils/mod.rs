@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::Path;
-pub mod kernel_version;
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};

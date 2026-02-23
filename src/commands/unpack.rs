@@ -216,26 +216,30 @@ fn worker_loop(rx: Arc<Receiver<UnpackTask>>) -> Result<()> {
 }
 
 fn set_permissions_and_times(path: &Path, mode: u32, mtime: u64) -> Result<()> {
-    // 1. Permissions
-    let mut perms = fs::metadata(path)?.permissions();
+    // 1. Set mtime FIRST (before permissions, as setting readonly may block the file)
+    let mtime_system = SystemTime::UNIX_EPOCH + Duration::from_secs(mtime);
+    if let Ok(file) = File::open(path) {
+        let _ = file.set_modified(mtime_system);
+    }
+
+    // 2. Permissions - On Windows, fs::set_permissions often fails without admin.
+    // We gracefully handle this error.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
         perms.set_mode(mode);
+        fs::set_permissions(path, perms)?;
     }
-    // On Windows, mode is limited (read-only or not). We can try mapping basic bits.
     #[cfg(windows)]
     {
-        // Simple mapping: if write bit is missing, set readonly
+        // On Windows, only readonly flag is meaningful.
+        // Try to set it, but don't fail if it doesn't work.
+        let mut perms = fs::metadata(path)?.permissions();
         let readonly = mode & 0o222 == 0;
         perms.set_readonly(readonly);
+        let _ = fs::set_permissions(path, perms);
     }
-    fs::set_permissions(path, perms)?;
-
-    // 2. Times (mtime)
-    let mtime_system = SystemTime::UNIX_EPOCH + Duration::from_secs(mtime);
-    let file = File::open(path)?;
-    file.set_modified(mtime_system)?;
 
     Ok(())
 }
