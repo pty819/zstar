@@ -2,6 +2,8 @@
 
 `zstar` is a modern, blazingly fast command-line tool written in Rust for compressing and decompressing directories using the `.tar.zst` format. It is designed to saturate high-speed NVMe storage and multi-core CPUs.
 
+It includes both a **CLI** and a **GUI** (built with Tauri + Svelte).
+
 [中文文档 (Chinese Documentation)](#zstar---高性能并行归档工具)
 
 ## Key Features
@@ -23,80 +25,81 @@
     *   **Error Resilience**: Optional `--ignore-failed-read` to skip unreadable files without crashing.
     *   **Windows Compatibility**: Graceful permission handling - no admin required for extraction.
 *   **🧠 Memory Efficient**: Smart buffer pooling and large-file streaming preventing OOM on huge files.
-*   **Cross-Platform**: Works seamlessly on Linux, macOS, and Windows.
+*   **🌐 Cross-Platform**: Works seamlessly on Linux, macOS, and Windows.
+*   **🖥️ GUI Available**: Optional modern desktop GUI built with Tauri v2 + Svelte 5.
+
+## Quick Start
+
+### CLI
+```bash
+# Compress
+./zstar pack ./my_folder -o backup.tar.zst
+
+# Extract
+./zstar unpack backup.tar.zst -o ./output
+```
+
+### GUI
+Download the GUI from releases, or build it yourself (see below).
 
 ## Build & Compilation
 
-Ensure you have Rust installed (via [rustup](https://rustup.rs/)).
+### Prerequisites
 
-### Linux
-Prerequisites: `build-essential` (GCC, Make) for compiling zstd C dependencies.
+- **Rust**: Install via [rustup](https://rustup.rs/)
+- **Node.js**: Required for GUI (LTS version recommended)
+- **Build Tools**:
+  - Linux: `build-essential` (GCC, Make)
+  - macOS: Xcode Command Line Tools
+  - Windows: Visual Studio Build Tools (C++)
+
+### Build Commands
+
+This project uses a Cargo workspace containing both CLI and GUI.
+
 ```bash
-# Ubuntu/Debian
-sudo apt update && sudo apt install build-essential
+# Clone and enter project
+git clone https://github.com/yourusername/zstar.git
+cd zstar
 
-# Build
+# Build CLI only
 cargo build --release
-```
-*Note: On Linux, Compio automatically uses io_uring when available (Kernel 6.0+). Falls back to epoll on older kernels.*
 
-### macOS
-Prerequisites: Xcode Command Line Tools.
+# Build GUI (requires Node.js)
+cd gui && npm install && npm run tauri build
+```
+
+The built binaries will be at:
+- CLI: `target/release/zstar.exe`
+- GUI: `target/release/zstar-gui.exe`
+
+### Building Both at Once
+
 ```bash
-xcode-select --install
+# CLI
 cargo build --release
+
+# GUI
+cd gui && npm install && npm run tauri build
 ```
 
-### Windows
-Prerequisites: C++ One-Click Build Tools (Visual Studio Build Tools).
-```powershell
-# In PowerShell or CMD
-cargo build --release
+## Project Structure
+
 ```
-The resulting binary will be at `.\target\release\zstar.exe`. Note that `zstar` on Windows automatically simulates Unix permissions (755/644) so archives are usable on Linux.
-
-## Usage
-
-### compress (pack)
-
-Pack a directory into an archive.
-
-```bash
-# Basic usage
-./zstar pack ./my_data
-
-# Specify output filename
-./zstar pack ./my_data -o backup.tar.zst
-
-# High compression (Level 10), explicit threads, ignore read errors
-./zstar pack ./my_data --level 10 --threads 16 --ignore-failed-read
-
-# Disable long-distance matching (enabled by default)
-./zstar pack ./my_data --no-long
+zstar/
+├── Cargo.toml           # Workspace configuration
+├── src/                # CLI source code
+│   ├── main.rs
+│   ├── cli.rs
+│   └── commands/
+└── gui/               # GUI source code (Tauri + Svelte)
+    ├── src/            # Rust backend
+    │   └── lib.rs     # Tauri commands
+    ├── src/           # Svelte frontend
+    │   └── routes/
+    ├── src-tauri/     # Tauri config
+    └── package.json   # Node.js dependencies
 ```
-
-**Options:**
-*   `-o, --output <PATH>`: Output file (defaults to `<DIR>.tar.zst`).
-*   `-l, --level <NUM>`: Compression level (1-22, default: 3).
-*   `-t, --threads <NUM>`: Number of I/O and compression threads (default: all cores).
-*   `--ignore-failed-read`: Skip files with errors (e.g., Permission Denied) instead of aborting.
-*   `--no-long`: Disable Zstd Long Distance Matching.
-
-### Decompress (unpack)
-
-Unpack an archive to a directory.
-
-```bash
-# Unpack to current directory
-./zstar unpack backup.tar.zst
-
-# Unpack to specific folder with 8 threads
-./zstar unpack backup.tar.zst -o ./restore_path -t 8
-```
-
-**Options:**
-*   `-o, --output <PATH>`: Output directory (defaults to current directory).
-*   `-t, --threads <NUM>`: Number of extraction threads (default: all cores).
 
 ## Architecture & Design Philosophy
 
@@ -150,8 +153,6 @@ Unpacking is trickier than packing due to race conditions (creating a file in a 
 
 ### 4. Key Constants
 
-The following constants control pipeline behavior:
-
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `PATH_CHANNEL_CAPACITY` | 1000 | Scanner → Reader path distribution |
@@ -160,26 +161,13 @@ The following constants control pipeline behavior:
 | `CHUNK_SIZE` | 4MB | Streaming chunk size for large files |
 | `MEMORY_FILE_THRESHOLD` | 128MB | Files larger than this use streaming |
 
-### 5. Project Structure
-
-```
-src/
-├── main.rs           # Entry point, CLI parsing with clap
-├── cli.rs            # Command-line interface definitions
-├── commands/
-│   ├── mod.rs        # Module exports
-│   ├── pack.rs       # Packing logic (uses compio_reader)
-│   ├── compio_reader.rs  # Unified async I/O worker pool
-│   └── unpack.rs     # Unpacking logic
-└── utils/
-    └── mod.rs        # Cross-platform filesystem helpers
-```
-
 ---
 
 # zstar - 高性能并行归档工具
 
 `zstar` 是一个使用 Rust 编写的现代化、极速命令行工具，用于将目录压缩为 `.tar.zst` 格式。它的设计目标是榨干 NVMe 高速存储和多核 CPU 的性能。
+
+现在同时提供 **CLI** 和 **GUI**（基于 Tauri + Svelte 构建）。
 
 ## 核心特性
 
@@ -201,79 +189,70 @@ src/
     *   **Windows 兼容性**: 优雅处理权限问题 - 解压无需管理员权限。
 *   **🧠 内存高效**: 智能缓冲池（Buffer Pooling）和大文件流式传输，防止大文件导致 OOM（内存溢出）。
 *   **跨平台**: 在 Linux、macOS 和 Windows 上无缝运行。
+*   **🖥️ GUI 可用**: 可选的现代桌面 GUI，基于 Tauri v2 + Svelte 5 构建。
+
+## 快速开始
+
+### CLI
+```bash
+# 压缩
+./zstar pack ./my_folder -o backup.tar.zst
+
+# 解压
+./zstar unpack backup.tar.zst -o ./output
+```
+
+### GUI
+从 releases 下载 GUI，或自行构建（见下文）。
 
 ## 编译与构建
 
-请确保已安装 Rust 环境 (通过 [rustup](https://rustup.rs/))。
+### 前置要求
 
-### Linux
-前置要求: `build-essential` (GCC, Make) 用于编译 zstd 的 C 依赖。
+- **Rust**: 通过 [rustup](https://rustup.rs/) 安装
+- **Node.js**: 构建 GUI 需要（LTS 版本）
+- **构建工具**:
+  - Linux: `build-essential`
+  - macOS: Xcode Command Line Tools
+  - Windows: Visual Studio Build Tools (C++)
+
+### 构建命令
+
+本项目使用 Cargo 工作区，同时包含 CLI 和 GUI。
+
 ```bash
-# Ubuntu/Debian
-sudo apt update && sudo apt install build-essential
+# 克隆并进入项目
+git clone https://github.com/yourusername/zstar.git
+cd zstar
 
-# 编译
+# 仅构建 CLI
 cargo build --release
-```
-*注：在 Linux 上，Compio 会在可用时自动使用 io_uring（Kernel 6.0+）。在较旧的内核上回退到 epoll。*
 
-### macOS
-前置要求: Xcode Command Line Tools.
-```bash
-xcode-select --install
-cargo build --release
+# 构建 GUI（需要 Node.js）
+cd gui && npm install && npm run tauri build
 ```
 
-### Windows
-前置要求: C++ 生成工具 (Visual Studio Build Tools).
-```powershell
-# 在 PowerShell 或 CMD 中运行
-cargo build --release
+构建产物位置：
+- CLI: `target/release/zstar.exe`
+- GUI: `target/release/zstar-gui.exe`
+
+## 项目结构
+
 ```
-生成的二进制文件位于 `.\target\release\zstar.exe`。注意：Windows 版会自动将权限模拟为 Unix 标准 (755/644)，确保生成的压缩包在 Linux 上解压可用。
-
-## 使用指南
-
-### 压缩 (pack)
-
-将目录打包为存档文件。
-
-```bash
-# 基础用法
-./zstar pack ./my_data
-
-# 指定输出文件名
-./zstar pack ./my_data -o backup.tar.zst
-
-# 高压缩率 (Level 10), 指定线程数, 忽略读取错误
-./zstar pack ./my_data --level 10 --threads 16 --ignore-failed-read
-
-# 禁用长距离匹配 (默认开启)
-./zstar pack ./my_data --no-long
+zstar/
+├── Cargo.toml           # 工作区配置
+├── src/                # CLI 源代码
+│   ├── main.rs
+│   ├── cli.rs
+│   └── commands/
+└── gui/               # GUI 源代码 (Tauri + Svelte)
+    ├── src/            # Rust 后端
+    │   └── lib.rs     # Tauri 命令
+    ├── src/           # Svelte 前端
+    │   └── routes/
+    ├── src-tauri/    # Tauri 配置
+    └── package.json   # Node.js 依赖
 ```
-
-**选项参数:**
-*   `-o, --output <PATH>`: 输出文件路径 (默认为 `<DIR>.tar.zst`).
-*   `-l, --level <NUM>`: 压缩等级 (1-22, 默认: 3).
-*   `-t, --threads <NUM>`: I/O 和压缩线程数 (默认: 所有核心).
-*   `--ignore-failed-read`: 跳过读取错误的文件（如权限不足）而不终止程序。
-*   `--no-long`: 禁用 Zstd 长距离匹配 (Long Distance Matching)。
-
-### 解压 (unpack)
-
-将压缩包解压到目录。
-
-```bash
-# 解压到当前目录
-./zstar unpack backup.tar.zst
-
-# 解压到指定目录, 使用 8 个线程
-./zstar unpack backup.tar.zst -o ./restore_path -t 8
-```
-
-**选项参数:**
-*   `-o, --output <PATH>`: 输出目录 (默认为当前目录)。
-*   `-t, --threads <NUM>`: 解压并行线程数 (默认: 所有核心)。
 
 ## 架构与设计理念
 
@@ -334,18 +313,3 @@ cargo build --release
 | `CHUNK_CHANNEL_CAPACITY` | 100 | 大文件块 (专用) |
 | `CHUNK_SIZE` | 4MB | 大文件流式传输块大小 |
 | `MEMORY_FILE_THRESHOLD` | 128MB | 大于此值使用流式传输 |
-
-### 5. 项目结构
-
-```
-src/
-├── main.rs           # 入口点，使用 clap 解析 CLI
-├── cli.rs            # 命令行接口定义
-├── commands/
-│   ├── mod.rs        # 模块导出
-│   ├── pack.rs       # 打包逻辑（使用 compio_reader）
-│   ├── compio_reader.rs  # 统一异步 I/O 工作池
-│   └── unpack.rs     # 解压逻辑
-└── utils/
-    └── mod.rs        # 跨平台文件系统辅助函数
-```
