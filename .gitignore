@@ -1,1 +1,28 @@
-/target
+# Build outputs
+target/
+gui/target/
+gui/build/
+gui/.svelte-kit/
+gui/gen/
+
+# Dependencies
+gui/node_modules/
+
+# Release bundles
+release-bundle/
+*.tar.zst
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Lock files (optional - uncomment if you want to commit)
+# Cargo.lock
+# gui/Cargo.lock

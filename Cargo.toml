@@ -1,9 +1,11 @@
-[package]
-name = "zstar"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "gui",
+]
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0.101"
 clap = { version = "4.5.60", features = ["derive"] }
 crossbeam-channel = "0.5.15"
@@ -17,8 +19,41 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 compio = { version = "0.18", features = ["fs", "macros", "sync", "runtime"] }
 compio-runtime = "0.11"
 flume = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util"] }
+walkdir = "2"
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-opener = "2"
+
+[package]
+name = "zstar"
+version = "0.1.0"
+edition = "2024"
+authors = ["zstar"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossbeam-channel.workspace = true
+dashmap.workspace = true
+indicatif.workspace = true
+jwalk.workspace = true
+libc.workspace = true
+num_cpus.workspace = true
+tar.workspace = true
+zstd.workspace = true
+compio.workspace = true
+compio-runtime.workspace = true
+flume.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
 
-
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
